@@ -142,31 +142,35 @@ def fetch_single_dam(dam):
     if not dam_id or dam_id == "要ID入力":
         return None
 
-    # Cookie共有用セッション
     session = requests.Session()
     session.headers.update(
         {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/122.0.0.0 Safari/537.36"
             ),
             "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
     )
 
     page_url = (
         f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
     )
-    api_url = f"https://www.river.go.jp/kantei/api/obs/dam?obsCd={dam_id}"
+    # パラメータ名を obsGageCd と obsCd の両方で切り替え可能に設定
+    api_url = f"https://www.river.go.jp/kantei/api/obs/dam?obsGageCd={dam_id}"
 
     try:
         # 1. ページ本体にアクセスして必要なCookieを取得
-        session.get(page_url, timeout=5)
+        session.get(page_url, timeout=10)
 
         # 2. リファラを設定してAPI呼び出し
         session.headers.update({"Referer": page_url})
-        res = session.get(api_url, timeout=5)
+        res = session.get(api_url, timeout=10)
 
         if res.status_code != 200:
             print(
@@ -174,7 +178,6 @@ def fetch_single_dam(dam):
             )
             return None
 
-        # レスポンス本文の空チェック
         text = res.text.strip()
         if not text:
             print(f"NG: {dam_name} (空のレスポンス)", flush=True)
@@ -195,7 +198,12 @@ def fetch_single_dam(dam):
         return {"name": dam_name, "id": dam_id, "rate": rate}
 
     except json.JSONDecodeError:
-        print(f"NG: {dam_name} (JSON変換失敗: レスポンスがHTML等)", flush=True)
+        # HTML等の不意なレスポンスが返された場合に原因ログを表示
+        preview = res.text.replace("\n", " ")[:150] if "res" in locals() else ""
+        print(
+            f"NG: {dam_name} (JSON変換失敗: レスポンスがHTML等 -> {preview})",
+            flush=True,
+        )
         return None
     except Exception as e:
         print(f"NG: {dam_name} ({e})", flush=True)
@@ -208,6 +216,15 @@ def send_to_gas(results):
         print(
             "【注意】GAS_WEBHOOK_URL"
             " が設定されていないため、送信をスキップしました。",
+            flush=True,
+        )
+        return
+
+    # 取得結果が空の場合は送信を防ぐ (Invalid payload 対策)
+    if not results:
+        print(
+            "【スキップ】取得データが 0"
+            " 件のため、GASへの送信をスキップしました。",
             flush=True,
         )
         return
@@ -232,8 +249,8 @@ def main():
     print("スクレイピングを開始します...", flush=True)
     results = []
 
-    # サーバーブロックを抑えるため max_workers を 5 に落として並列アクセス
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # サーバー遮断（IP制限）を考慮し、同時接続数を 3 に調整
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
