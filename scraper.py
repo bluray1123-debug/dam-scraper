@@ -1,6 +1,7 @@
 import concurrent.futures
 import json
 import os
+import time
 import requests
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
@@ -133,8 +134,6 @@ DAMS = [
     {"name": "大保ダム", "id": "609999999999002"},
 ]
 
-
-# ブラウザのリクエストを模倣するためのヘッダーセット
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -147,17 +146,21 @@ HEADERS = {
 }
 
 def fetch_dam_data(dam):
+    # IDから川の防災情報等のJSON API URLを自動生成（※必要に応じて形式を調整してください）
+    url = f"https://www.river.go.jp/kawabou/api/dam/detail?obsrvId={dam['id']}"
+    
     try:
-        response = requests.get(dam["url"], headers=HEADERS, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
-        # レスポンスがJSONかどうかの検証
         content_type = response.headers.get("Content-Type", "")
         if "application/json" not in content_type and not response.text.strip().startswith(("{", "[")):
             print(f"NG: {dam['name']} (HTML等の非JSONレスポンスを受信: {response.text[:60]}...)")
             return None
 
-        return response.json()
+        data = response.json()
+        data["name"] = dam["name"]
+        return data
 
     except requests.exceptions.RequestException as e:
         print(f"NG: {dam['name']} (ネットワークエラー: {e})")
@@ -170,22 +173,26 @@ def main():
     print("スクレイピングを開始します...")
     results = []
 
-    for dam in dams:
+    # 大文字の DAMS を参照するように修正
+    for dam in DAMS:
         data = fetch_dam_data(dam)
         if data:
             results.append(data)
             print(f"取得成功: {dam['name']}")
         
-        # サーバー負荷軽減およびブロック回避のためのアクセス間隔
         time.sleep(1)
 
-    print(f"取得完了: {len(results)}/{len(dams)} 基")
+    print(f"取得完了: {len(results)}/{len(DAMS)} 基")
 
-    if results:
-        # GAS等への送信処理
+    if results and RAW_GAS_URL:
         print("GASへデータを送信します...")
+        try:
+            res = requests.post(RAW_GAS_URL, json=results, timeout=30)
+            print(f"GAS送信結果: {res.status_code}")
+        except Exception as e:
+            print(f"GAS送信エラー: {e}")
     else:
-        print("【スキップ】取得データが 0 件のため、GASへの送信をスキップしました。")
+        print("【スキップ】取得データが 0 件、または GAS_WEBHOOK_URL が未設定のため送信をスキップしました。")
 
 if __name__ == "__main__":
     main()
