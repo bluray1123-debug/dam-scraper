@@ -1,9 +1,13 @@
 import os
-import concurrent.futures
+import re
+import json
 import requests
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
+# 対象ダムのリスト (ダム名とCGI用15桁ID)
 DAMS = [
     {"name": "岩尾内ダム", "id": "1368010125140"},
     {"name": "サンルダム", "id": "601011281104002"},
@@ -132,90 +136,96 @@ DAMS = [
     {"name": "大保ダム", "id": "609999999999002"},
 ]
 
-def fetch_single_dam(dam):
-    dam_name = dam["name"]
-    dam_id = dam.get("id")
 
-    if not dam_id:
-        return None
+def clean_url(raw_url):
+    """URLの前後の空白・クォーテーションを除去し、https://を補正"""
+    if not raw_url:
+        return ""
+    url = raw_url.strip().strip("'\"")
+    if url and not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+    return url
 
-    # 川の防災情報のJSONデータ取得API
-    url = "https://www.river.go.jp/kawabou/api/dam/dps"
-    params = {"gsvCd": dam_id}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": f"https://www.river.go.jp/kawabou/ipDamState.do?gsvCd={dam_id}"
-    }
+def extract_rate_from_soup(soup):
+    for tr in soup.find_all("tr"):
+        cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+        if len(cols) >= 5:
+            if re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
+                for col in reversed(cols):
+                    match = re.search(r"([\d\.]+)", col)
+                    if match:
+                        try:
+                            val = float(match.group(1))
+                            if 0 <= val <= 100:
+                                return val
+                        except ValueError:
+                            continue
+    return None
 
+def get_storage_rate_from_cgi(dam_id):
+    url = f"https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID={dam_id}&KIND=3&PAGE=0"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=8)
-        if res.status_code != 200:
-            print(f"NG: {dam_name} (HTTP {res.status_code})", flush=True)
-            return None
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = "euc-jp"
+        soup = BeautifulSoup(res.text, "html.parser")
 
-        data = res.json()
-        
-        # APIレスポンスから貯水率（rate）を取得
-        rate = None
-        if "rate" in data and data["rate"] is not None:
-            try:
-                rate = float(data["rate"])
-            except ValueError:
-                pass
-        elif "damVal" in data and "rate" in data["damVal"]:
-            try:
-                rate = float(data["damVal"]["rate"])
-            except (ValueError, TypeError):
-                pass
+        rate = extract_rate_from_soup(soup)
+        if rate is not None:
+            return rate
 
-        print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
+        frames = soup.find_all(["frame", "iframe"])
+        for frame in frames:
+            src = frame.get("src")
+            if not src:
+                continue
+            frame_url = urljoin(url, src)
 
-        return {
-            "name": dam_name,
-            "id": dam_id,
-            "rate": rate,
-            "raw": data  # 必要に応じてAPI返却値全体を含める
-        }
+            res_frame = requests.get(frame_url, headers=headers, timeout=10)
+            res_frame.encoding = "euc-jp"
+            soup_frame = BeautifulSoup(res_frame.text, "html.parser")
+
+            rate = extract_rate_from_soup(soup_frame)
+            if rate is not None:
+                return rate
 
     except Exception as e:
-        print(f"NG: {dam_name} ({e})", flush=True)
-        return None
+        print(f"ID {dam_id} 取得時エラー: {e}")
+    return None
 
-def send_to_gas(results):
-    if not RAW_GAS_URL:
-        print("【注意】GAS_WEBHOOK_URL が設定されていないため、送信をスキップしました。", flush=True)
+def fetch_and_send():
+    gas_url = clean_url(RAW_GAS_URL)
+    if not gas_url:
+        print("エラー: GAS_WEBHOOK_URL が設定されていません。")
         return
 
-    try:
-        # GAS側の期待値に合わせて送信フォーマットを判定・調整
-        # 1. 配列を直接送信するパターン
-        payload = results
-        
-        response = requests.post(
-            RAW_GAS_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=20
-        )
-        print(f"GAS送信結果: ステータスコード {response.status_code}", flush=True)
-        print(f"GASレスポンス: {response.text}", flush=True)
-    except Exception as e:
-        print(f"GAS送信失敗: {e}", flush=True)
+    dam_list = []
+    for dam in DAMS:
+        rate = get_storage_rate_from_cgi(dam["id"])
+        if rate is not None:
+            print(f"[取得成功] {dam['name']}: {rate}%")
+            dam_list.append({
+                "dam_name": dam["name"],
+                "storage_rate": rate
+            })
+        else:
+            print(f"[取得失敗] {dam['name']}")
 
-def main():
-    print("スクレイピングを開始します...", flush=True)
-    results = []
+    if not dam_list:
+        print("送信対象データが0件のため終了します。")
+        return
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                results.append(res)
-
-    print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
-
-    send_to_gas(results)
+    # GASへデータ送信
+    print(f"GASへ送信中... (送信先: {gas_url[:30]}...)")
+    payload = {"damList": dam_list}
+    res = requests.post(
+        gas_url,
+        data=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+        timeout=30
+    )
+    print("GAS送信結果:", res.text)
 
 if __name__ == "__main__":
-    main()
+    fetch_and_send()
