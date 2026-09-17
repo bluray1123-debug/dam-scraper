@@ -7,10 +7,8 @@ from bs4 import BeautifulSoup
 GAS_WEBHOOK_URL = os.environ.get("GAS_WEBHOOK_URL")
 
 # 対象ダムのリスト (ダム名とCGI用15桁ID)
-# 大島ダムなどのIDも必要に応じて追記してください
 DAMS = [
     {"name": "宮ヶ瀬ダム", "id": "601011281104002"},
-    # {"name": "大島ダム", "id": "ここに15桁のIDを入力"},
 ]
 
 def get_storage_rate_from_cgi(dam_id):
@@ -19,23 +17,30 @@ def get_storage_rate_from_cgi(dam_id):
     
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
+        # CGIページ特有のShift_JIS(cp932)に文字コードを固定
+        res.encoding = "cp932"
         
-        # 1. 正規表現で「貯水率◯◯%」のパターンを全体テキストから抽出
+        soup = BeautifulSoup(res.text, "html.parser")
         text = soup.get_text()
-        match = re.search(r"貯水率[^\d]*([\d\.]+)\s*%", text)
+
+        # 1. 全文テキストから「貯水率」直後の数値を抽出
+        match = re.search(r"貯水率[^\d]*([\d\.]+)", text)
         if match:
             return float(match.group(1))
-        
-        # 2. 表のセル（td/th）から「貯水率」の隣の数値を抽出
+
+        # 2. テーブル構造から抽出（「貯水率」を含む行の数値セルを順次チェック）
         for tr in soup.find_all("tr"):
             cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
             for i, cell in enumerate(cells):
-                if "貯水率" in cell and i + 1 < len(cells):
-                    val_str = re.sub(r"[^\d\.]", "", cells[i+1])
-                    if val_str:
-                        return float(val_str)
+                if "貯水率" in cell:
+                    for target in cells[i+1:]:
+                        num_match = re.search(r"([\d\.]+)", target)
+                        if num_match:
+                            return float(num_match.group(1))
+
+        # 失敗時のデバッグ情報出力
+        print(f"[DEBUG ID:{dam_id}] 抽出失敗。レスポンス先頭:\n{text[:200]}")
+
     except Exception as e:
         print(f"ID {dam_id} 取得時エラー: {e}")
     return None
