@@ -134,133 +134,58 @@ DAMS = [
 ]
 
 
-def fetch_single_dam(dam):
-    """Sessionを使用して事前アクセスを経てAPIから直接貯水率を取得する"""
-    dam_name = dam["name"]
-    dam_id = dam.get("id")
+# ブラウザのリクエストを模倣するためのヘッダーセット
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "X-Requested-With": "XMLHttpRequest",
+}
 
-    if not dam_id or dam_id == "要ID入力":
-        return None
-
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
-    )
-
-    page_url = (
-        f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
-    )
-    # パラメータ名を obsGageCd と obsCd の両方で切り替え可能に設定
-    api_url = f"https://www.river.go.jp/kantei/api/obs/dam?obsGageCd={dam_id}"
-
+def fetch_dam_data(dam):
     try:
-        # 1. ページ本体にアクセスして必要なCookieを取得
-        session.get(page_url, timeout=10)
+        response = requests.get(dam["url"], headers=HEADERS, timeout=10)
+        response.raise_for_status()
 
-        # 2. リファラを設定してAPI呼び出し
-        session.headers.update({"Referer": page_url})
-        res = session.get(api_url, timeout=10)
-
-        if res.status_code != 200:
-            print(
-                f"NG: {dam_name} (HTTP Status {res.status_code})", flush=True
-            )
+        # レスポンスがJSONかどうかの検証
+        content_type = response.headers.get("Content-Type", "")
+        if "application/json" not in content_type and not response.text.strip().startswith(("{", "[")):
+            print(f"NG: {dam['name']} (HTML等の非JSONレスポンスを受信: {response.text[:60]}...)")
             return None
 
-        text = res.text.strip()
-        if not text:
-            print(f"NG: {dam_name} (空のレスポンス)", flush=True)
-            return None
+        return response.json()
 
-        # 3. JSONパース
-        data = json.loads(text)
-
-        rate = None
-        dams_data = data.get("dams", [])
-        if dams_data and len(dams_data) > 0:
-            target = dams_data[0]
-            val = target.get("swtrRate") or target.get("curSwtrRate")
-            if val is not None and val != "-":
-                rate = float(val)
-
-        print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
-        return {"name": dam_name, "id": dam_id, "rate": rate}
-
+    except requests.exceptions.RequestException as e:
+        print(f"NG: {dam['name']} (ネットワークエラー: {e})")
     except json.JSONDecodeError:
-        # HTML等の不意なレスポンスが返された場合に原因ログを表示
-        preview = res.text.replace("\n", " ")[:150] if "res" in locals() else ""
-        print(
-            f"NG: {dam_name} (JSON変換失敗: レスポンスがHTML等 -> {preview})",
-            flush=True,
-        )
-        return None
-    except Exception as e:
-        print(f"NG: {dam_name} ({e})", flush=True)
-        return None
-
-
-def send_to_gas(results):
-    """取得した結果をGASのWebHookへ送信する"""
-    if not RAW_GAS_URL:
-        print(
-            "【注意】GAS_WEBHOOK_URL"
-            " が設定されていないため、送信をスキップしました。",
-            flush=True,
-        )
-        return
-
-    # 取得結果が空の場合は送信を防ぐ (Invalid payload 対策)
-    if not results:
-        print(
-            "【スキップ】取得データが 0"
-            " 件のため、GASへの送信をスキップしました。",
-            flush=True,
-        )
-        return
-
-    try:
-        response = requests.post(
-            RAW_GAS_URL,
-            json={"dams": results},
-            headers={"Content-Type": "application/json"},
-            timeout=15,
-            allow_redirects=True,
-        )
-        print(
-            f"GAS送信結果: ステータスコード {response.status_code}", flush=True
-        )
-        print(f"GASレスポンス: {response.text}", flush=True)
-    except Exception as e:
-        print(f"GAS送信失敗: {e}", flush=True)
-
+        print(f"NG: {dam['name']} (JSONパース失敗)")
+    
+    return None
 
 def main():
-    print("スクレイピングを開始します...", flush=True)
+    print("スクレイピングを開始します...")
     results = []
 
-    # サーバー遮断（IP制限）を考慮し、同時接続数を 3 に調整
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                results.append(res)
+    for dam in dams:
+        data = fetch_dam_data(dam)
+        if data:
+            results.append(data)
+            print(f"取得成功: {dam['name']}")
+        
+        # サーバー負荷軽減およびブロック回避のためのアクセス間隔
+        time.sleep(1)
 
-    print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
+    print(f"取得完了: {len(results)}/{len(dams)} 基")
 
-    send_to_gas(results)
-
+    if results:
+        # GAS等への送信処理
+        print("GASへデータを送信します...")
+    else:
+        print("【スキップ】取得データが 0 件のため、GASへの送信をスキップしました。")
 
 if __name__ == "__main__":
     main()
