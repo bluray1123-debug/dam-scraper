@@ -11,7 +11,8 @@ RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 DAMS = [
     {"name": "岩尾内ダム", "id": "1368010125140"},
     {"name": "サンルダム", "id": "601011281104002"},
-    {"name": "宇連ダム", "id": "1368050651020", "max_capacity": 28420},  # max_capacityを追加
+    {"name": "宇連ダム", "id": "1368050651020", "max_capacity": 28420},
+    {"name": "早明浦ダム", "id": "1368080700010"},
     # ... 他のダム
 ]
 
