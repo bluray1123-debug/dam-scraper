@@ -12,7 +12,6 @@ def is_storage_rate_missing(dam_id):
         res.encoding = "euc-jp"
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # フレーム構造の解析
         frames = soup.find_all(["frame", "iframe"])
         for frame in frames:
             src = frame.get("src")
@@ -21,7 +20,6 @@ def is_storage_rate_missing(dam_id):
                 res_f.encoding = "euc-jp"
                 soup = BeautifulSoup(res_f.text, "html.parser")
 
-        # データ行の最終列（貯水率）を判定
         for tr in soup.find_all("tr"):
             cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
             if len(cols) >= 5 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]):
@@ -45,19 +43,42 @@ def generate_dams_code():
     dams = []
     seen_ids = set()
 
-    for tr in soup.find_all("tr"):
-        cols = tr.find_all("td")
-        if len(cols) >= 3:
-            dam_name = cols[2].get_text(strip=True)
-            for a in tr.find_all("a"):
-                href = a.get("href", "")
-                match = re.search(r"ID=(\d{15})", href)
-                if match:
-                    dam_id = match.group(1)
-                    if dam_id not in seen_ids and dam_name:
-                        seen_ids.add(dam_id)
-                        dams.append({"name": dam_name, "id": dam_id})
-                    break
+    # ページ内のすべてのリンクから 15桁のID を全件探索
+    for a in soup.find_all("a"):
+        href = a.get("href", "")
+        match = re.search(r"ID=(\d{15})", href)
+        if not match:
+            continue
+
+        dam_id = match.group(1)
+        if dam_id in seen_ids:
+            continue
+
+        # 親行（tr）またはセル（td）からダム名を柔軟に抽出
+        dam_name = ""
+        tr = a.find_parent("tr")
+        if tr:
+            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            # 「ダム」の文字が含まれるセルを優先的に取得
+            dam_cells = [c for c in cells if "ダム" in c]
+            if dam_cells:
+                dam_name = dam_cells[0]
+            elif len(cells) >= 2:
+                dam_name = cells[-2] if len(cells) > 2 else cells[0]
+
+        # リンクテキスト自体に「ダム」が含まれる場合の補助
+        if not dam_name or "ダム" not in dam_name:
+            a_text = a.get_text(strip=True)
+            if "ダム" in a_text:
+                dam_name = a_text
+
+        # ダム名の整形（かっこや余計な改行を除去）
+        dam_name = re.sub(r"[\s\n\t]+", "", dam_name)
+        dam_name = re.sub(r"（.*?）|\(.*?\)", "", dam_name)
+
+        if dam_name and dam_id not in seen_ids:
+            seen_ids.add(dam_id)
+            dams.append({"name": dam_name, "id": dam_id})
 
     print(f"# 取得完了: 計 {len(dams)} 基 (貯水率『-』のチェック中...)")
     print("DAMS = [")
@@ -65,7 +86,6 @@ def generate_dams_code():
     for d in dams:
         is_missing = is_storage_rate_missing(d["id"])
         if is_missing:
-            # 貯水率が「-」のダムには max_capacity 項目を出力
             print(f'    {{"name": "{d["name"]}", "id": "{d["id"]}", "max_capacity": None}},  # ← 貯水率「-」のため要入力')
         else:
             print(f'    {{"name": "{d["name"]}", "id": "{d["id"]}"}},')
