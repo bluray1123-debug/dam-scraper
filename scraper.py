@@ -1,7 +1,6 @@
 import os
 import time
 import requests
-from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
@@ -134,39 +133,64 @@ DAMS = [
 ]
 
 HEADERS = {
-    # ブラウザからのアクセスに見せかけるためのUser-Agent
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
 }
 
-def fetch_dam_cgi(dam):
-    # DspDamData.exe のURL形式
-    url = f"https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID={dam['id']}&KIND=3&PAGE=0"
+def fetch_dam_data(dam):
+    # 川の防災情報の現行データ取得用内部API
+    url = "https://www.river.go.jp/kawabou/api/dam/dps"
     
+    params = {
+        "gsvCd": dam["id"],
+        "_": int(time.time() * 1000)
+    }
+
+    # API側でRefererの有無をチェックしているため追加
+    headers = HEADERS.copy()
+    headers["Referer"] = f"https://www.river.go.jp/kawabou/ipDamState.do?gsvCd={dam['id']}"
+
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         res.raise_for_status()
 
-        # エンコーディングを Shift_JIS (CP932) に明示的に設定
-        res.encoding = 'shift_jis'
-
-        # HTMLを解析
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 例: ページ内のテーブル（表）やテキストデータを取得
-        tables = soup.find_all('table')
-        if not tables:
-            print(f"NG: {dam['name']} (表データが見つかりませんでした)")
-            return None
-
-        # 必要に応じて表の中身を抽出する処理を記述
-        parsed_data = {
-            "name": dam["name"],
-            "id": dam["id"],
-            "raw_html_snippet": str(tables[0])[:200] # テスト確認用
-        }
-        
-        return parsed_data
+        data = res.json()
+        data["name"] = dam["name"]
+        data["id"] = dam["id"]
+        if "max_capacity" in dam:
+            data["max_capacity"] = dam["max_capacity"]
+            
+        return data
 
     except Exception as e:
         print(f"NG: {dam['name']} ({e})")
         return None
+
+def main():
+    print("スクレイピングを開始します...")
+    results = []
+
+    for dam in DAMS:
+        data = fetch_dam_data(dam)
+        if data:
+            results.append(data)
+            print(f"取得成功: {dam['name']}")
+        
+        # サーバー負荷防止用ウェイト
+        time.sleep(0.5)
+
+    print(f"取得完了: {len(results)}/{len(DAMS)} 基")
+
+    if results and RAW_GAS_URL:
+        print("GASへデータを送信します...")
+        try:
+            res = requests.post(RAW_GAS_URL, json=results, timeout=30)
+            print(f"GAS送信結果: {res.status_code}")
+        except Exception as e:
+            print(f"GAS送信エラー: {e}")
+    else:
+        print("【スキップ】取得データが 0 件、または GAS_WEBHOOK_URL が未設定です。")
+
+if __name__ == "__main__":
+    main()
