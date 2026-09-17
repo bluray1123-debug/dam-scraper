@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 
 RIVER_API_URL = "https://www.river.go.jp/kawabou/api/dam/getDamStateList"
@@ -14,31 +15,28 @@ def fetch_and_send():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",  # JSON返却を強制する必須ヘッダー
         "Referer": TOP_PAGE_URL,
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
     }
 
-    # セッションを作成（Cookieを保持）
     session = requests.Session()
     session.headers.update(headers)
 
     try:
-        # 1. まずトップページにアクセスしてセッション(Cookie)を取得
+        # 1. トップページへアクセスしてCookieを取得
         init_res = session.get(TOP_PAGE_URL, timeout=15)
         print(f"トップページ取得 Status: {init_res.status_code}")
 
-        # 2. セッションを保持した状態でAPIを叩く（POST通信）
-        response = session.post(RIVER_API_URL, json={}, timeout=15)
+        # 2. GETリクエストでAPIを呼び出し（キャッシュ回避用のタイムスタンプ付き）
+        api_url_with_param = f"{RIVER_API_URL}?_={int(time.time() * 1000)}"
+        response = session.get(api_url_with_param, timeout=15)
         print(f"API応答 Status: {response.status_code}")
-
-        # POSTで取り込めなかった場合はGETで試行
-        if not response.text.startswith("{") and not response.text.startswith("["):
-            response = session.get(RIVER_API_URL, timeout=15)
 
         try:
             data = response.json()
         except json.JSONDecodeError:
-            print("エラー: セッション確立後もJSONが取得できませんでした。")
+            print("エラー: JSONパースに失敗しました（HTMLが返却されている可能性があります）。")
             print("【レスポンス内容（先頭300文字）】:")
             print(response.text[:300])
             return
@@ -48,7 +46,7 @@ def fetch_and_send():
             dam_name = item.get("damName")
             storage_rate = item.get("storageRate")
 
-            # デバッグ用ログ（宮ヶ瀬・大島の検出確認）
+            # デバッグログ（宮ヶ瀬・大島の検出確認）
             if dam_name and ("大島" in dam_name or "宮" in dam_name):
                 print(f"[DEBUG 検出] 名前: '{dam_name}', 貯水率: {storage_rate}")
 
@@ -64,7 +62,7 @@ def fetch_and_send():
             print("送信対象のダムデータが0件のため処理を中断します。")
             return
 
-        # 3. GASへ送信
+        # 3. GASへデータ送信
         payload = {"damList": dam_list}
         res = requests.post(
             GAS_WEBHOOK_URL,
