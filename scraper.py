@@ -33,26 +33,27 @@ def extract_data_from_table(soup, max_capacity=None):
         cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
         
         # 日時行の特定 (例: 2026/09/18 00:30 ...)
-        if len(cols) >= 5 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
+        if len(cols) >= 3 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
             
-            # max_capacity が指定されている場合：貯水量から計算
+            # 1. max_capacity が指定されている場合：行内の数値から貯水量を検出して計算
             if max_capacity:
-                # 3列目（Index 2）が「貯水量(×10^3 m³)」
-                storage_str = cols[2] if len(cols) > 2 else ""
-                match = re.search(r"([\d\.]+)", storage_str)
-                if match:
-                    try:
-                        storage_val = float(match.group(1))
-                        # (貯水量 / 有効貯水容量) * 100
-                        calculated_rate = round((storage_val / max_capacity) * 100, 1)
-                        if 0 <= calculated_rate <= 100:
-                            return calculated_rate
-                    except (ValueError, ZeroDivisionError):
-                        pass
+                # 行内の全カラムから数値のみを抽出（日付・時刻以外のカラムから）
+                for val_str in cols[2:]:
+                    # 数値（小数含む）を抽出
+                    match = re.search(r"^([\d\.]+)$", val_str)
+                    if match:
+                        try:
+                            val = float(match.group(1))
+                            # 貯水量は有効容量と同程度〜それ以下で、流入量等の小さな値(数十以下)と区別できる想定
+                            # （例: 宇連ダムなら 0 < val <= max_capacity * 1.2）
+                            if 0 < val <= max_capacity * 1.2:
+                                calculated_rate = round((val / max_capacity) * 100, 1)
+                                if 0 <= calculated_rate <= 100:
+                                    return calculated_rate
+                        except (ValueError, ZeroDivisionError):
+                            continue
 
-            # max_capacity が指定されていない場合：本来の「貯水率」列を参照
-            # テーブル構成: [年月日, 時刻, 流域平均雨量, 貯水量, 流入量, 放流量, 貯水率]
-            # 貯水率は最後の列 (cols[-1])
+            # 2. max_capacity が指定されていない場合：本来の「貯水率」列を参照
             rate_str = cols[-1]
             
             # 欠測・未配信の "-" や空文字の場合は計算不可としてスキップ
