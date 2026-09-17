@@ -10,8 +10,29 @@ GAS_WEBHOOK_URL = os.environ.get("GAS_WEBHOOK_URL")
 # 対象ダムのリスト (ダム名とCGI用15桁ID)
 DAMS = [
     {"name": "サンルダム", "id": "601011281104002"},
-    # {"name": "宮ヶ瀬ダム", "id": "宮ヶ瀬ダムの15桁ID"},
+    # {"name": "宮ヶ瀬ダム", "id": "ここに15桁のIDを入力"},
 ]
+
+def extract_rate_from_soup(soup):
+    """
+    HTMLから日付・時刻形式が存在するデータ行を探し、末尾の貯水率（数値）を返す
+    """
+    for tr in soup.find_all("tr"):
+        cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+        if len(cols) >= 5:
+            # 1列目が日付(YYYY/MM/DD)、2列目が時刻(HH:MM)の行をデータ行として認識
+            if re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
+                # 行の末尾側から数値（貯水率）を探索
+                for col in reversed(cols):
+                    match = re.search(r"([\d\.]+)", col)
+                    if match:
+                        try:
+                            val = float(match.group(1))
+                            if 0 <= val <= 100:  # 貯水率として適切な範囲か確認
+                                return val
+                        except ValueError:
+                            continue
+    return None
 
 def get_storage_rate_from_cgi(dam_id):
     url = f"https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID={dam_id}&KIND=3&PAGE=0"
@@ -22,44 +43,31 @@ def get_storage_rate_from_cgi(dam_id):
         res.encoding = "euc-jp"
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # 1. 表が iframe / frame で埋め込まれているか判定し、子画面を取得
-        iframe = soup.find(["iframe", "frame"])
-        if iframe and iframe.get("src"):
-            iframe_url = urljoin(url, iframe["src"])
-            res_frame = requests.get(iframe_url, headers=headers, timeout=10)
+        # 1. 親ページ自体のテーブルから抽出試行
+        rate = extract_rate_from_soup(soup)
+        if rate is not None:
+            return rate
+
+        # 2. フレーム（frame / iframe）タグを検出して巡回
+        frames = soup.find_all(["frame", "iframe"])
+        print(f"[DEBUG ID:{dam_id}] 検出されたフレーム数: {len(frames)}")
+
+        for frame in frames:
+            src = frame.get("src")
+            if not src:
+                continue
+            frame_url = urljoin(url, src)
+            print(f"[DEBUG ID:{dam_id}] フレーム読込: {frame_url}")
+
+            res_frame = requests.get(frame_url, headers=headers, timeout=10)
             res_frame.encoding = "euc-jp"
-            soup = BeautifulSoup(res_frame.text, "html.parser")
+            soup_frame = BeautifulSoup(res_frame.text, "html.parser")
 
-        # 2. 表のヘッダーから「貯水率」の列番号を特定
-        storage_col_idx = None
-        tables = soup.find_all("table")
+            rate = extract_rate_from_soup(soup_frame)
+            if rate is not None:
+                return rate
 
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows:
-                headers_text = [th.get_text(strip=True) for th in row.find_all(["th", "td"])]
-                for idx, h in enumerate(headers_text):
-                    if "貯水率" in h:
-                        storage_col_idx = idx
-                        break
-                if storage_col_idx is not None:
-                    break
-
-            # 3. 列番号が見つかったら、データ行（数値が存在する先頭の行）から最新値を抽出
-            if storage_col_idx is not None:
-                for row in rows:
-                    cols = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                    if len(cols) > storage_col_idx:
-                        val_str = cols[storage_col_idx]
-                        num_match = re.search(r"([\d\.]+)", val_str)
-                        if num_match:
-                            return float(num_match.group(1))
-
-        # 4. バックアップ処理（テキスト全体から「貯水率」直後の数値を探索）
-        text = soup.get_text()
-        match = re.search(r"貯水率[^\d]*([\d\.]+)", text)
-        if match:
-            return float(match.group(1))
+        print(f"[DEBUG ID:{dam_id}] データ行（日付・時刻）の抽出に失敗しました。")
 
     except Exception as e:
         print(f"ID {dam_id} 取得時エラー: {e}")
