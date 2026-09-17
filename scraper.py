@@ -1,5 +1,6 @@
-import os
 import concurrent.futures
+import json
+import os
 import requests
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
@@ -132,55 +133,83 @@ DAMS = [
     {"name": "大保ダム", "id": "609999999999002"},
 ]
 
+
 def fetch_single_dam(dam):
-    """川の防災情報の公式観測APIから直接貯水率を取得する"""
+    """Sessionを使用して事前アクセスを経てAPIから直接貯水率を取得する"""
     dam_name = dam["name"]
     dam_id = dam.get("id")
 
     if not dam_id or dam_id == "要ID入力":
         return None
 
-    # 川の防災情報 リアルタイムダム観測API
-    url = f"https://www.river.go.jp/kantei/api/obs/dam?obsCd={dam_id}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
-    }
+    # Cookie共有用セッション
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+        }
+    )
+
+    page_url = (
+        f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
+    )
+    api_url = f"https://www.river.go.jp/kantei/api/obs/dam?obsCd={dam_id}"
 
     try:
-        res = requests.get(url, headers=headers, timeout=8)
+        # 1. ページ本体にアクセスして必要なCookieを取得
+        session.get(page_url, timeout=5)
+
+        # 2. リファラを設定してAPI呼び出し
+        session.headers.update({"Referer": page_url})
+        res = session.get(api_url, timeout=5)
+
         if res.status_code != 200:
-            print(f"NG: {dam_name} (HTTP Status {res.status_code})", flush=True)
+            print(
+                f"NG: {dam_name} (HTTP Status {res.status_code})", flush=True
+            )
             return None
 
-        data = res.json()
-        
+        # レスポンス本文の空チェック
+        text = res.text.strip()
+        if not text:
+            print(f"NG: {dam_name} (空のレスポンス)", flush=True)
+            return None
+
+        # 3. JSONパース
+        data = json.loads(text)
+
         rate = None
-        # APIレスポンス構造の解析
-        # 構造: {"dams": [{"swtrRate": "85.2", ...}]}
         dams_data = data.get("dams", [])
         if dams_data and len(dams_data) > 0:
             target = dams_data[0]
-            # 貯水率（swtrRate または curSwtrRate）を取得
             val = target.get("swtrRate") or target.get("curSwtrRate")
             if val is not None and val != "-":
                 rate = float(val)
 
         print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
-        return {
-            "name": dam_name,
-            "id": dam_id,
-            "rate": rate
-        }
+        return {"name": dam_name, "id": dam_id, "rate": rate}
 
+    except json.JSONDecodeError:
+        print(f"NG: {dam_name} (JSON変換失敗: レスポンスがHTML等)", flush=True)
+        return None
     except Exception as e:
         print(f"NG: {dam_name} ({e})", flush=True)
         return None
 
+
 def send_to_gas(results):
     """取得した結果をGASのWebHookへ送信する"""
     if not RAW_GAS_URL:
-        print("【注意】GAS_WEBHOOK_URL が設定されていないため、送信をスキップしました。", flush=True)
+        print(
+            "【注意】GAS_WEBHOOK_URL"
+            " が設定されていないため、送信をスキップしました。",
+            flush=True,
+        )
         return
 
     try:
@@ -189,18 +218,22 @@ def send_to_gas(results):
             json={"dams": results},
             headers={"Content-Type": "application/json"},
             timeout=15,
-            allow_redirects=True
+            allow_redirects=True,
         )
-        print(f"GAS送信結果: ステータスコード {response.status_code}", flush=True)
+        print(
+            f"GAS送信結果: ステータスコード {response.status_code}", flush=True
+        )
         print(f"GASレスポンス: {response.text}", flush=True)
     except Exception as e:
         print(f"GAS送信失敗: {e}", flush=True)
+
 
 def main():
     print("スクレイピングを開始します...", flush=True)
     results = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    # サーバーブロックを抑えるため max_workers を 5 に落として並列アクセス
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
@@ -210,6 +243,7 @@ def main():
     print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
 
     send_to_gas(results)
+
 
 if __name__ == "__main__":
     main()
