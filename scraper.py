@@ -1,8 +1,7 @@
-import concurrent.futures
-import json
 import os
 import time
 import requests
+from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
@@ -135,64 +134,39 @@ DAMS = [
 ]
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    "X-Requested-With": "XMLHttpRequest",
+    # ブラウザからのアクセスに見せかけるためのUser-Agent
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def fetch_dam_data(dam):
-    # IDから川の防災情報等のJSON API URLを自動生成（※必要に応じて形式を調整してください）
-    url = f"https://www.river.go.jp/kawabou/api/dam/detail?obsrvId={dam['id']}"
+def fetch_dam_cgi(dam):
+    # DspDamData.exe のURL形式
+    url = f"https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID={dam['id']}&KIND=3&PAGE=0"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        res.raise_for_status()
 
-        content_type = response.headers.get("Content-Type", "")
-        if "application/json" not in content_type and not response.text.strip().startswith(("{", "[")):
-            print(f"NG: {dam['name']} (HTML等の非JSONレスポンスを受信: {response.text[:60]}...)")
+        # エンコーディングを Shift_JIS (CP932) に明示的に設定
+        res.encoding = 'shift_jis'
+
+        # HTMLを解析
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 例: ページ内のテーブル（表）やテキストデータを取得
+        tables = soup.find_all('table')
+        if not tables:
+            print(f"NG: {dam['name']} (表データが見つかりませんでした)")
             return None
 
-        data = response.json()
-        data["name"] = dam["name"]
-        return data
-
-    except requests.exceptions.RequestException as e:
-        print(f"NG: {dam['name']} (ネットワークエラー: {e})")
-    except json.JSONDecodeError:
-        print(f"NG: {dam['name']} (JSONパース失敗)")
-    
-    return None
-
-def main():
-    print("スクレイピングを開始します...")
-    results = []
-
-    # 大文字の DAMS を参照するように修正
-    for dam in DAMS:
-        data = fetch_dam_data(dam)
-        if data:
-            results.append(data)
-            print(f"取得成功: {dam['name']}")
+        # 必要に応じて表の中身を抽出する処理を記述
+        parsed_data = {
+            "name": dam["name"],
+            "id": dam["id"],
+            "raw_html_snippet": str(tables[0])[:200] # テスト確認用
+        }
         
-        time.sleep(1)
+        return parsed_data
 
-    print(f"取得完了: {len(results)}/{len(DAMS)} 基")
-
-    if results and RAW_GAS_URL:
-        print("GASへデータを送信します...")
-        try:
-            res = requests.post(RAW_GAS_URL, json=results, timeout=30)
-            print(f"GAS送信結果: {res.status_code}")
-        except Exception as e:
-            print(f"GAS送信エラー: {e}")
-    else:
-        print("【スキップ】取得データが 0 件、または GAS_WEBHOOK_URL が未設定のため送信をスキップしました。")
-
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        print(f"NG: {dam['name']} ({e})")
+        return None
