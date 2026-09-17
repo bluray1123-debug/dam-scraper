@@ -10,7 +10,8 @@ RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 # 対象ダムのリスト (ダム名とCGI用15桁ID)
 DAMS = [
     {"name": "サンルダム", "id": "601011281104002"},
-    # {"name": "宮ヶ瀬ダム", "id": "ここに15桁のIDを入力"},
+    {"name": "宮ヶ瀬ダム", "id": "1368030799020"},
+    {"name": "八ッ場ダム", "id": "303031283317025"},
 ]
 
 def clean_url(raw_url):
