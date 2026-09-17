@@ -1,8 +1,6 @@
 import os
-import re
 import concurrent.futures
 import requests
-from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
@@ -135,31 +133,36 @@ DAMS = [
 ]
 
 def fetch_single_dam(dam):
-    """1基分のデータをWebから抽出する"""
+    """川の防災情報の内部JSON APIから直接貯水率を取得する"""
     dam_name = dam["name"]
     dam_id = dam.get("id")
 
     if not dam_id or dam_id == "要ID入力":
         return None
 
-    url = f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    # 川の防災情報のリアルタイムデータ提供API (JSON)
+    url = f"https://www.river.go.jp/kantei/api/dam/detail?id={dam_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
+    }
 
     try:
         res = requests.get(url, headers=headers, timeout=8)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
+        if res.status_code != 200:
+            print(f"NG: {dam_name} (HTTP Status {res.status_code})", flush=True)
+            return None
 
-        # HTMLから数値（貯水率等）を検索
+        data = res.json()
+        
+        # レスポンス構造から貯水率を取得 (キー名は川の防災情報の仕様に対応)
         rate = None
         
-        # ％表記が含まれるセルを取得
-        for td in soup.find_all(["td", "th"]):
-            text = td.get_text(strip=True)
-            match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
-            if match:
-                rate = float(match.group(1))
-                break
+        # 最新の観測データ構造を参照
+        if "damObs" in data and "storageRate" in data["damObs"]:
+            rate = float(data["damObs"]["storageRate"])
+        elif "storageRate" in data:
+            rate = float(data["storageRate"])
 
         print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
         return {
@@ -179,11 +182,13 @@ def send_to_gas(results):
         return
 
     try:
+        # GASの302リダイレクトによるPOSTデータ消失を防ぐ設定
         response = requests.post(
             RAW_GAS_URL,
             json={"dams": results},
             headers={"Content-Type": "application/json"},
-            timeout=15
+            timeout=15,
+            allow_redirects=True
         )
         print(f"GAS送信結果: ステータスコード {response.status_code}", flush=True)
         print(f"GASレスポンス: {response.text}", flush=True)
@@ -194,7 +199,6 @@ def main():
     print("スクレイピングを開始します...", flush=True)
     results = []
 
-    # 並列で125基分のデータを高速取得
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
         for future in concurrent.futures.as_completed(futures):
@@ -204,7 +208,6 @@ def main():
 
     print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
 
-    # GASへデータを送信
     send_to_gas(results)
 
 if __name__ == "__main__":
