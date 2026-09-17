@@ -133,15 +133,15 @@ DAMS = [
 ]
 
 def fetch_single_dam(dam):
-    """川の防災情報の内部JSON APIから直接貯水率を取得する"""
+    """川の防災情報の公式観測APIから直接貯水率を取得する"""
     dam_name = dam["name"]
     dam_id = dam.get("id")
 
     if not dam_id or dam_id == "要ID入力":
         return None
 
-    # 川の防災情報のリアルタイムデータ提供API (JSON)
-    url = f"https://www.river.go.jp/kantei/api/dam/detail?id={dam_id}"
+    # 川の防災情報 リアルタイムダム観測API
+    url = f"https://www.river.go.jp/kantei/api/obs/dam?obsCd={dam_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
@@ -155,14 +155,16 @@ def fetch_single_dam(dam):
 
         data = res.json()
         
-        # レスポンス構造から貯水率を取得 (キー名は川の防災情報の仕様に対応)
         rate = None
-        
-        # 最新の観測データ構造を参照
-        if "damObs" in data and "storageRate" in data["damObs"]:
-            rate = float(data["damObs"]["storageRate"])
-        elif "storageRate" in data:
-            rate = float(data["storageRate"])
+        # APIレスポンス構造の解析
+        # 構造: {"dams": [{"swtrRate": "85.2", ...}]}
+        dams_data = data.get("dams", [])
+        if dams_data and len(dams_data) > 0:
+            target = dams_data[0]
+            # 貯水率（swtrRate または curSwtrRate）を取得
+            val = target.get("swtrRate") or target.get("curSwtrRate")
+            if val is not None and val != "-":
+                rate = float(val)
 
         print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
         return {
@@ -182,7 +184,6 @@ def send_to_gas(results):
         return
 
     try:
-        # GASの302リダイレクトによるPOSTデータ消失を防ぐ設定
         response = requests.post(
             RAW_GAS_URL,
             json={"dams": results},
