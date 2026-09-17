@@ -1,6 +1,8 @@
 import os
-import time
+import re
+import concurrent.futures
 import requests
+from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
@@ -132,65 +134,78 @@ DAMS = [
     {"name": "大保ダム", "id": "609999999999002"},
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-}
+def fetch_single_dam(dam):
+    """1基分のデータをWebから抽出する"""
+    dam_name = dam["name"]
+    dam_id = dam.get("id")
 
-def fetch_dam_data(dam):
-    # 川の防災情報の現行データ取得用内部API
-    url = "https://www.river.go.jp/kawabou/api/dam/dps"
-    
-    params = {
-        "gsvCd": dam["id"],
-        "_": int(time.time() * 1000)
-    }
-
-    # API側でRefererの有無をチェックしているため追加
-    headers = HEADERS.copy()
-    headers["Referer"] = f"https://www.river.go.jp/kawabou/ipDamState.do?gsvCd={dam['id']}"
-
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        res.raise_for_status()
-
-        data = res.json()
-        data["name"] = dam["name"]
-        data["id"] = dam["id"]
-        if "max_capacity" in dam:
-            data["max_capacity"] = dam["max_capacity"]
-            
-        return data
-
-    except Exception as e:
-        print(f"NG: {dam['name']} ({e})")
+    if not dam_id or dam_id == "要ID入力":
         return None
 
+    url = f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # HTMLから数値（貯水率等）を検索
+        rate = None
+        
+        # ％表記が含まれるセルを取得
+        for td in soup.find_all(["td", "th"]):
+            text = td.get_text(strip=True)
+            match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+            if match:
+                rate = float(match.group(1))
+                break
+
+        print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
+        return {
+            "name": dam_name,
+            "id": dam_id,
+            "rate": rate
+        }
+
+    except Exception as e:
+        print(f"NG: {dam_name} ({e})", flush=True)
+        return None
+
+def send_to_gas(results):
+    """取得した結果をGASのWebHookへ送信する"""
+    if not RAW_GAS_URL:
+        print("【注意】GAS_WEBHOOK_URL が設定されていないため、送信をスキップしました。", flush=True)
+        return
+
+    try:
+        response = requests.post(
+            RAW_GAS_URL,
+            json={"dams": results},
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        print(f"GAS送信結果: ステータスコード {response.status_code}", flush=True)
+        print(f"GASレスポンス: {response.text}", flush=True)
+    except Exception as e:
+        print(f"GAS送信失敗: {e}", flush=True)
+
 def main():
-    print("スクレイピングを開始します...")
+    print("スクレイピングを開始します...", flush=True)
     results = []
 
-    for dam in DAMS:
-        data = fetch_dam_data(dam)
-        if data:
-            results.append(data)
-            print(f"取得成功: {dam['name']}")
-        
-        # サーバー負荷防止用ウェイト
-        time.sleep(0.5)
+    # 並列で125基分のデータを高速取得
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if res:
+                results.append(res)
 
-    print(f"取得完了: {len(results)}/{len(DAMS)} 基")
+    print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
 
-    if results and RAW_GAS_URL:
-        print("GASへデータを送信します...")
-        try:
-            res = requests.post(RAW_GAS_URL, json=results, timeout=30)
-            print(f"GAS送信結果: {res.status_code}")
-        except Exception as e:
-            print(f"GAS送信エラー: {e}")
-    else:
-        print("【スキップ】取得データが 0 件、または GAS_WEBHOOK_URL が未設定です。")
+    # GASへデータを送信
+    send_to_gas(results)
 
 if __name__ == "__main__":
     main()
