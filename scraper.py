@@ -27,6 +27,11 @@ def fetch_and_send():
         for item in data.get("damList", []):
             dam_name = item.get("damName")
             storage_rate = item.get("storageRate")
+            
+            # デバッグログ：大島が含まれるダムの情報をGitHub Actionsログに出力
+            if dam_name and "大島" in dam_name:
+                print(f"[DEBUG] 検出されたダム: damName='{dam_name}', storageRate={storage_rate}")
+
             if dam_name and storage_rate is not None:
                 dam_list.append({
                     "dam_name": dam_name,
