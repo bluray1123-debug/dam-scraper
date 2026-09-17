@@ -1,36 +1,18 @@
 import re
 import requests
-from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-def is_storage_rate_missing(dam_id):
-    """CGI画面を確認し、貯水率が『-』表記か判定する"""
-    url = f"https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID={dam_id}&KIND=3&PAGE=0"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        res.encoding = "euc-jp"
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        frames = soup.find_all(["frame", "iframe"])
-        for frame in frames:
-            src = frame.get("src")
-            if src:
-                res_f = requests.get(urljoin(url, src), headers=headers, timeout=5)
-                res_f.encoding = "euc-jp"
-                soup = BeautifulSoup(res_f.text, "html.parser")
-
-        for tr in soup.find_all("tr"):
-            cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            if len(cols) >= 5 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]):
-                for col in reversed(cols):
-                    if col == "-":
-                        return True
-                    if re.search(r"[\d\.]+", col):
-                        return False
-    except Exception:
-        pass
-    return False
+# 15桁IDが元ページに存在しない主要ダムのID辞書（補完用）
+KNOWN_IDS = {
+    "宮ヶ瀬ダム": "1368030799020",
+    "宇連ダム": "1368050651020",
+    "矢木沢ダム": "1368030799010",
+    "草木ダム": "303031283315020",
+    "下久保ダム": "303031283318020",
+    "岩屋ダム": "305071285521010",
+    "早明浦ダム": "308061288801010",
+    "一庫ダム": "306051286603010",
+}
 
 def generate_dams_code():
     url = "https://www.mlit.go.jp/mizukokudo/mizsei/mizukokudo_mizsei_tk2_000024.html"
@@ -40,56 +22,53 @@ def generate_dams_code():
     res.encoding = res.apparent_encoding
     soup = BeautifulSoup(res.text, "html.parser")
 
-    dams = []
-    seen_ids = set()
-
-    # ページ内のすべてのリンクから 15桁のID を全件探索
+    # 1. ページ内の全リンクから15桁IDを収集
+    id_map = {}
     for a in soup.find_all("a"):
         href = a.get("href", "")
         match = re.search(r"ID=(\d{15})", href)
-        if not match:
-            continue
+        if match:
+            dam_id = match.group(1)
+            # 親要素からダム名を取得
+            tr = a.find_parent("tr")
+            if tr:
+                texts = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                dam_names = [t for t in texts if "ダム" in t or "遊水地" in t]
+                if dam_names:
+                    name = re.sub(r"（.*?）|\(.*?\)", "", dam_names[0])
+                    id_map[name] = dam_id
 
-        dam_id = match.group(1)
-        if dam_id in seen_ids:
-            continue
+    # 2. ページ全体のテキストから全132基のダム名を抽出
+    page_text = soup.get_text()
+    # 「〜ダム」または「渡良瀬遊水地」にマッチ
+    raw_dams = re.findall(r"([一-龠ぁ-ヶーA-Za-z0-9]+(?:ダム|渡良瀬遊水地))", page_text)
+    
+    # 重複を除外してリスト化
+    all_dams = []
+    seen = set()
+    for dam in raw_dams:
+        dam_clean = re.sub(r"（.*?）|\(.*?\)", "", dam)
+        if dam_clean not in seen and len(dam_clean) > 2:
+            seen.add(dam_clean)
+            all_dams.append(dam_clean)
 
-        # 親行（tr）またはセル（td）からダム名を柔軟に抽出
-        dam_name = ""
-        tr = a.find_parent("tr")
-        if tr:
-            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            # 「ダム」の文字が含まれるセルを優先的に取得
-            dam_cells = [c for c in cells if "ダム" in c]
-            if dam_cells:
-                dam_name = dam_cells[0]
-            elif len(cells) >= 2:
-                dam_name = cells[-2] if len(cells) > 2 else cells[0]
-
-        # リンクテキスト自体に「ダム」が含まれる場合の補助
-        if not dam_name or "ダム" not in dam_name:
-            a_text = a.get_text(strip=True)
-            if "ダム" in a_text:
-                dam_name = a_text
-
-        # ダム名の整形（かっこや余計な改行を除去）
-        dam_name = re.sub(r"[\s\n\t]+", "", dam_name)
-        dam_name = re.sub(r"（.*?）|\(.*?\)", "", dam_name)
-
-        if dam_name and dam_id not in seen_ids:
-            seen_ids.add(dam_id)
-            dams.append({"name": dam_name, "id": dam_id})
-
-    print(f"# 取得完了: 計 {len(dams)} 基 (貯水率『-』のチェック中...)")
+    print(f"# 抽出完了: 全 {len(all_dams)} 基")
     print("DAMS = [")
     
-    for d in dams:
-        is_missing = is_storage_rate_missing(d["id"])
-        if is_missing:
-            print(f'    {{"name": "{d["name"]}", "id": "{d["id"]}", "max_capacity": None}},  # ← 貯水率「-」のため要入力')
+    for dam_name in all_dams:
+        # ページ内URLから取れたID -> 知られている既知ID -> 未設定ID の順で判定
+        dam_id = id_map.get(dam_name) or KNOWN_IDS.get(dam_name)
+        
+        if dam_id:
+            # 特殊な計算が必要なダム（宇連ダム等）
+            if dam_name == "宇連ダム":
+                print(f'    {{"name": "{dam_name}", "id": "{dam_id}", "max_capacity": 28420}},')
+            else:
+                print(f'    {{"name": "{dam_name}", "id": "{dam_id}"}},')
         else:
-            print(f'    {{"name": "{d["name"]}", "id": "{d["id"]}"}},')
-            
+            # ページ内にIDリンクがないダム
+            print(f'    {{"name": "{dam_name}", "id": "要ID入力"}},')
+
     print("]")
 
 if __name__ == "__main__":
