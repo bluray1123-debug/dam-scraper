@@ -1,11 +1,11 @@
 import os
+import re
 import concurrent.futures
 import requests
 from bs4 import BeautifulSoup
 
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
-# 対象ダムのリスト (ダム名とCGI用15桁ID)
 DAMS = [
     {"name": "岩尾内ダム", "id": "1368010125140"},
     {"name": "サンルダム", "id": "601011281104002"},
@@ -135,43 +135,67 @@ DAMS = [
 ]
 
 def fetch_single_dam(dam):
-    """1基分のデータを取得する関数"""
+    """1基分のデータをWebから抽出する"""
     dam_name = dam["name"]
     dam_id = dam.get("id")
 
-    # IDがない、または未設定のものはスキップ
     if not dam_id or dam_id == "要ID入力":
         return None
 
-    # 国交省 川の防災情報（貯水率詳細ページURL例）
     url = f"https://www.river.go.jp/kantei/p/f/1301010/index.html?ID={dam_id}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     try:
-        # timeoutを5秒に設定し、応答がないページで止まるのを防ぐ
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=8)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # --- ここに既存の解析（数値抽出）ロジックを記述 ---
-        # 例:
-        # rate = parse_storage_rate(soup)
-        # return {"name": dam_name, "rate": rate}
+        # HTMLから数値（貯水率等）を検索
+        rate = None
+        
+        # ％表記が含まれるセルを取得
+        for td in soup.find_all(["td", "th"]):
+            text = td.get_text(strip=True)
+            match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+            if match:
+                rate = float(match.group(1))
+                break
 
-        print(f"OK: {dam_name}", flush=True)
-        return {"name": dam_name, "status": "success"}
+        print(f"OK: {dam_name} -> 貯水率: {rate}%", flush=True)
+        return {
+            "name": dam_name,
+            "id": dam_id,
+            "rate": rate
+        }
 
     except Exception as e:
         print(f"NG: {dam_name} ({e})", flush=True)
         return None
 
+def send_to_gas(results):
+    """取得した結果をGASのWebHookへ送信する"""
+    if not RAW_GAS_URL:
+        print("【注意】GAS_WEBHOOK_URL が設定されていないため、送信をスキップしました。", flush=True)
+        return
+
+    try:
+        response = requests.post(
+            RAW_GAS_URL,
+            json={"dams": results},
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        print(f"GAS送信結果: ステータスコード {response.status_code}", flush=True)
+        print(f"GASレスポンス: {response.text}", flush=True)
+    except Exception as e:
+        print(f"GAS送信失敗: {e}", flush=True)
+
 def main():
     print("スクレイピングを開始します...", flush=True)
     results = []
 
-    # 最大10スレッドで同時に10基ずつ並列取得（120基も10秒前後で完了）
+    # 並列で125基分のデータを高速取得
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # DAMSリストを一括で並列実行
         futures = [executor.submit(fetch_single_dam, dam) for dam in DAMS]
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
@@ -180,8 +204,8 @@ def main():
 
     print(f"取得完了: {len(results)}/{len(DAMS)} 基", flush=True)
 
-    # --- ここでGAS等へWebHook送信（既存コード） ---
-    # send_to_gas(results)
+    # GASへデータを送信
+    send_to_gas(results)
 
 if __name__ == "__main__":
     main()
