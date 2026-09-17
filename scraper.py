@@ -23,40 +23,45 @@ def clean_url(raw_url):
         url = "https://" + url
     return url
 
-def parse_dam_table(soup, max_capacity=None):
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        idx_rate = None
-        idx_volume = None
+def parse_dam_soup(soup, max_capacity=None):
+    idx_rate = None
+    idx_volume = None
 
-        # 1. ヘッダーから「貯水率」と「貯水量」の列インデックスを取得
-        for row in rows:
-            headers = [th.get_text(strip=True) for th in row.find_all(["th", "td"])]
-            for idx, h in enumerate(headers):
-                if "貯水率" in h:
-                    idx_rate = idx
-                elif "貯水量" in h:
-                    idx_volume = idx
+    # 1. ページ全体の全テーブルから「貯水率」「貯水量」の列番号を特定
+    for tr in soup.find_all("tr"):
+        headers = [th.get_text(strip=True) for th in tr.find_all(["th", "td"])]
+        for idx, h in enumerate(headers):
+            if "貯水率" in h and idx_rate is None:
+                idx_rate = idx
+            if "貯水量" in h and idx_volume is None:
+                idx_volume = idx
 
-        # 2. 最新データ行の解析
-        for row in rows:
-            cols = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-            if len(cols) >= 5 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
-                
-                # パターンA: 「貯水率」列に数値が存在する場合
-                if idx_rate is not None and len(cols) > idx_rate:
-                    m_rate = re.search(r"([\d\.]+)", cols[idx_rate])
-                    if m_rate:
-                        return float(m_rate.group(1))
+    # 2. データ行（日付・時刻が存在する行）を解析
+    for tr in soup.find_all("tr"):
+        cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+        if len(cols) >= 5 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
+            
+            # 貯水率列の決定（検出失敗時は末尾または6列目をデフォルト指定）
+            target_rate_idx = idx_rate if idx_rate is not None else (6 if len(cols) > 6 else -1)
+            
+            # パターンA: 貯水率列から数値を抽出
+            if 0 <= target_rate_idx < len(cols):
+                rate_str = cols[target_rate_idx]
+                m_rate = re.search(r"([\d\.]+)", rate_str)
+                if m_rate:
+                    return float(m_rate.group(1))
 
-                # パターンB: 「貯水率」が「-」で、「貯水量」と「max_capacity」から計算する場合
-                if idx_volume is not None and len(cols) > idx_volume and max_capacity:
-                    m_vol = re.search(r"([\d\.]+)", cols[idx_volume])
-                    if m_vol:
-                        volume = float(m_vol.group(1))
-                        calc_rate = round((volume / max_capacity) * 100, 1)
-                        print(f"  [自動計算] 貯水量:{volume} / 容量:{max_capacity} -> {calc_rate}%")
-                        return calc_rate
+            # パターンB: 貯水率が「-」等で取得できず、max_capacity が指定されている場合計算
+            target_vol_idx = idx_volume if idx_volume is not None else (3 if len(cols) > 3 else -1)
+            if max_capacity and 0 <= target_vol_idx < len(cols):
+                vol_str = cols[target_vol_idx]
+                m_vol = re.search(r"([\d\.]+)", vol_str)
+                if m_vol:
+                    volume = float(m_vol.group(1))
+                    calc_rate = round((volume / max_capacity) * 100, 1)
+                    print(f"  [自動計算] 貯水量:{volume} / 容量:{max_capacity} -> {calc_rate}%")
+                    return calc_rate
+
     return None
 
 def get_storage_rate_from_cgi(dam):
@@ -70,7 +75,7 @@ def get_storage_rate_from_cgi(dam):
         res.encoding = "euc-jp"
         soup = BeautifulSoup(res.text, "html.parser")
 
-        rate = parse_dam_table(soup, max_capacity)
+        rate = parse_dam_soup(soup, max_capacity)
         if rate is not None:
             return rate
 
@@ -85,7 +90,7 @@ def get_storage_rate_from_cgi(dam):
             res_frame.encoding = "euc-jp"
             soup_frame = BeautifulSoup(res_frame.text, "html.parser")
 
-            rate = parse_dam_table(soup_frame, max_capacity)
+            rate = parse_dam_soup(soup_frame, max_capacity)
             if rate is not None:
                 return rate
 
