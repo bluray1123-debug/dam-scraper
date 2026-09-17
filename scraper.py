@@ -27,25 +27,21 @@ def clean_url(raw_url):
 
 def extract_data_from_table(soup, max_capacity=None):
     """
-    HTMLテーブルから最新（最上段）のデータを解析
+    HTMLテーブルから最新（正時含む）の有効なデータを解析
     """
     for tr in soup.find_all("tr"):
         cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
         
-        # 日時行の特定 (例: 2026/09/18 00:30 ...)
+        # 日時行の特定 (例: 2026/09/18 00:40 ...)
         if len(cols) >= 3 and re.search(r"\d{4}/\d{1,2}/\d{1,2}", cols[0]) and re.search(r"\d{1,2}:\d{2}", cols[1]):
             
-            # 1. max_capacity が指定されている場合：行内の数値から貯水量を検出して計算
+            # 1. max_capacity が指定されている場合：最新の貯水量から計算
             if max_capacity:
-                # 行内の全カラムから数値のみを抽出（日付・時刻以外のカラムから）
                 for val_str in cols[2:]:
-                    # 数値（小数含む）を抽出
                     match = re.search(r"^([\d\.]+)$", val_str)
                     if match:
                         try:
                             val = float(match.group(1))
-                            # 貯水量は有効容量と同程度〜それ以下で、流入量等の小さな値(数十以下)と区別できる想定
-                            # （例: 宇連ダムなら 0 < val <= max_capacity * 1.2）
                             if 0 < val <= max_capacity * 1.2:
                                 calculated_rate = round((val / max_capacity) * 100, 1)
                                 if 0 <= calculated_rate <= 100:
@@ -53,12 +49,12 @@ def extract_data_from_table(soup, max_capacity=None):
                         except (ValueError, ZeroDivisionError):
                             continue
 
-            # 2. max_capacity が指定されていない場合：本来の「貯水率」列を参照
+            # 2. max_capacity 未指定の場合：上から順に見て「-」以外の貯水率が入っている最新の行を採用
             rate_str = cols[-1]
             
-            # 欠測・未配信の "-" や空文字の場合は計算不可としてスキップ
+            # ハイフンや空文字、欠測の場合は上位の行（より新しい時刻）に値がないため、そのまま次の行（過去の時刻）へ探索を進める
             if rate_str in ["-", "ー", "", "欠測"]:
-                return None
+                continue
                 
             match = re.search(r"([\d\.]+)", rate_str)
             if match:
@@ -70,7 +66,6 @@ def extract_data_from_table(soup, max_capacity=None):
                     pass
 
     return None
-
 
 def fetch_single_dam(dam, session):
     dam_name = dam["name"]
