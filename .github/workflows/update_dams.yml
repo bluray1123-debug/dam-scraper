@@ -27,6 +27,6 @@ jobs:
         env:
           GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
         run: |
-          #python scraper.py
-          #python scraper_oshima.py
+          python scraper.py
+          python scraper_oshima.py
           python scraper_chiba.py
