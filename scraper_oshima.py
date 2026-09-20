@@ -39,45 +39,45 @@ def fetch_oshima_dam():
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # 1. ページ内に直接「貯水率（%）」が記載されているか検索
-        for element in soup.find_all(["td", "th", "div", "span"]):
-            text = element.get_text(strip=True)
-            match = re.search(r"([\d\.]+)\s*%", text)
-            if match:
-                val = float(match.group(1))
-                if 0 <= val <= 100:
-                    print(
-                        f"[取得成功] {dam_name}: {val}% (直接表記)", flush=True
-                    )
-                    return {"dam_name": dam_name, "storage_rate": val}
+        valid_rows = []
 
-        # 2. 貯留量（千m3）の数値から 11300 千m3 を基準に貯水率(%)を計算
+        # テーブルの各行を解析
         for tr in soup.find_all("tr"):
             cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            for item in cols:
-                # カンマを除去して数値のみ抽出 (例: 8,500.0 -> 8500.0)
-                clean_item = item.replace(",", "")
-                match = re.search(r"^([\d\.]+)$", clean_item)
-                if match:
-                    try:
-                        storage_val = float(match.group(1))
-                        # 0 < 貯留量 <= 11300 * 1.2 (洪水時等の余幅) の範囲内の数値を検出
-                        if 100 < storage_val <= (max_capacity * 1.2):
-                            calculated_rate = round(
-                                (storage_val / max_capacity) * 100, 1
-                            )
-                            if 0 <= calculated_rate <= 100:
-                                print(
-                                    f"[取得成功] {dam_name}: {calculated_rate}%"
-                                    f" (貯留量: {storage_val}千m³ より計算)",
-                                    flush=True,
-                                )
-                                return {
-                                    "dam_name": dam_name,
-                                    "storage_rate": calculated_rate,
-                                }
-                    except ValueError:
-                        pass
+
+            # データ行の特定: 1列目または2列目に時刻(00:00〜23:00)が含まれる行
+            # 例: ["18:00", "232.39", "7470", "0.59", ...]
+            if len(cols) >= 3 and any(
+                re.search(r"\d{1,2}:\d{2}", c) for c in cols[:2]
+            ):
+                # 時刻の次の列（貯水位）、その次の列（有効貯水量）を取得
+                # 時刻が入っているインデックスを探す
+                time_idx = 0 if re.search(r"\d{1,2}:\d{2}", cols[0]) else 1
+
+                # 貯水量の列（時刻の2つ後ろの列）
+                storage_col_idx = time_idx + 2
+                if len(cols) > storage_col_idx:
+                    storage_str = cols[storage_col_idx].replace(",", "")
+                    match = re.search(r"^([\d\.]+)$", storage_str)
+                    if match:
+                        try:
+                            val = float(match.group(1))
+                            if 0 < val <= max_capacity * 1.2:
+                                valid_rows.append(val)
+                        except ValueError:
+                            pass
+
+        # 最下段（最新データ）の有効貯水量を使用
+        if valid_rows:
+            latest_storage = valid_rows[-1]
+            calculated_rate = round((latest_storage / max_capacity) * 100, 1)
+
+            print(
+                f"[取得成功] {dam_name}: {calculated_rate}% (最新の有効貯水量:"
+                f" {latest_storage}千m³ より計算)",
+                flush=True,
+            )
+            return {"dam_name": dam_name, "storage_rate": calculated_rate}
 
     except Exception as e:
         print(f"[エラー] {dam_name}: {e}", flush=True)
