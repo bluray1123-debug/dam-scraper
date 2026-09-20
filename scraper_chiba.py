@@ -124,7 +124,7 @@ def main():
                 gas_url,
                 data=json.dumps(payload),
                 headers={"Content-Type": "application/json"},
-                timeout=30,
+                timeout=60,
             )
             print("GAS送信結果:", res.text)
         except Exception as e:
