@@ -23,17 +23,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 川の防災情報スクレイピング実行
+      - name: スクレイピングスクリプト実行
         env:
           GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
-        #run: python scraper.py
-
-      - name: 大島ダムスクレイピング実行
-        env:
-          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
-        #run: python scraper_oshima.py
-        
-      - name: 千葉県の水道用ダムスクレイピング実行
-        env:
-          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
-        run: python scraper_chiba.py
+        run: |
+          #python scraper.py
+          #python scraper_oshima.py
+          python scraper_chiba.py
