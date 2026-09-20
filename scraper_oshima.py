@@ -4,12 +4,12 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-# 環境変数からGASのWebhook URLを取得
 RAW_GAS_URL = os.environ.get("GAS_WEBHOOK_URL", "")
 
 OSHIMA_DAM = {
     "name": "大島ダム",
     "url": "https://www.water.go.jp/mizu/chubu/realtime/p020201_60/302_1.html",
+    "max_capacity": 11300.0,  # 有効貯水容量: 11,300 千m3
 }
 
 
@@ -23,32 +23,61 @@ def clean_url(raw_url):
 
 
 def fetch_oshima_dam():
-    """大島ダムの最新貯水量（または貯水率）を取得"""
     dam_name = OSHIMA_DAM["name"]
     url = OSHIMA_DAM["url"]
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    max_capacity = OSHIMA_DAM["max_capacity"]
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
 
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        # Shift_JIS等の文字化けを防ぐため自動判別
+        res = requests.get(url, headers=headers, timeout=15)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # テーブルから行を取得
+        # 1. ページ内に直接「貯水率（%）」が記載されているか検索
+        for element in soup.find_all(["td", "th", "div", "span"]):
+            text = element.get_text(strip=True)
+            match = re.search(r"([\d\.]+)\s*%", text)
+            if match:
+                val = float(match.group(1))
+                if 0 <= val <= 100:
+                    print(
+                        f"[取得成功] {dam_name}: {val}% (直接表記)", flush=True
+                    )
+                    return {"dam_name": dam_name, "storage_rate": val}
+
+        # 2. 貯留量（千m3）の数値から 11300 千m3 を基準に貯水率(%)を計算
         for tr in soup.find_all("tr"):
             cols = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-
-            # 行内のテキストから数字＋%（貯水率）を探索
             for item in cols:
-                match = re.search(r"([\d\.]+)\s*%", item)
+                # カンマを除去して数値のみ抽出 (例: 8,500.0 -> 8500.0)
+                clean_item = item.replace(",", "")
+                match = re.search(r"^([\d\.]+)$", clean_item)
                 if match:
-                    val = float(match.group(1))
-                    if 0 <= val <= 100:
-                        print(f"[取得成功] {dam_name}: {val}%", flush=True)
-                        return {"dam_name": dam_name, "storage_rate": val}
-
-                # 貯水量（千m3）の数値取得が必要な場合
-                # テーブル構造に合わせて条件分岐を調整可能
+                    try:
+                        storage_val = float(match.group(1))
+                        # 0 < 貯留量 <= 11300 * 1.2 (洪水時等の余幅) の範囲内の数値を検出
+                        if 100 < storage_val <= (max_capacity * 1.2):
+                            calculated_rate = round(
+                                (storage_val / max_capacity) * 100, 1
+                            )
+                            if 0 <= calculated_rate <= 100:
+                                print(
+                                    f"[取得成功] {dam_name}: {calculated_rate}%"
+                                    f" (貯留量: {storage_val}千m³ より計算)",
+                                    flush=True,
+                                )
+                                return {
+                                    "dam_name": dam_name,
+                                    "storage_rate": calculated_rate,
+                                }
+                    except ValueError:
+                        pass
 
     except Exception as e:
         print(f"[エラー] {dam_name}: {e}", flush=True)
@@ -65,7 +94,6 @@ def main():
         print("データを取得できなかったため処理を終了します。")
         return
 
-    # GASへ送信（GAS_WEBHOOK_URLが設定されている場合）
     if gas_url:
         print(f"GASへ送信中... (送信先: {gas_url[:30]}...)")
         payload = {"damList": [result]}
@@ -81,7 +109,9 @@ def main():
         except Exception as e:
             print("GAS送信エラー:", e)
     else:
-        print("※ GAS_WEBHOOK_URL が未設定のため、GASへの送信はスキップしました。")
+        print(
+            "※ GAS_WEBHOOK_URL が未設定のため、GASへの送信はスキップしました。"
+        )
 
 
 if __name__ == "__main__":
