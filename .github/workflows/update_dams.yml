@@ -32,3 +32,8 @@ jobs:
         env:
           GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
         run: python scraper_oshima.py
+        
+      - name: 千葉県の水道用ダムスクレイピング実行
+        env:
+          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
+        run: python scraper_chiba.py
